@@ -10,7 +10,7 @@ from collections import deque
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
-import Basic_controller as controller
+import Trajectory_controller as controller
 
 # Map constants from controller module (kept for readability)
 IDLE = controller.IDLE

@@ -293,11 +293,11 @@ class ODriveThread(threading.Thread):
         # Driver components
         self.odrv = None
         self.axis = None
-        self.max_torque = 0.15  #min limit
+        self.max_torque = 1  #min limit
         self.tor_coef = 0.708282
         self.Kt = 8.27/270
         self.offset = 0.0
-
+        self.torque_scale = 1.2
         # Physic components
         self.start_pos = -90
 
@@ -480,8 +480,16 @@ class ODriveThread(threading.Thread):
         ep = q - q_d
         ev = qdot - qdot_d
         D = self.visc_friction
-
+        # --- CHIÊU BOOST MOMEN KHỞI ĐỘNG CỦA BRO ---
+        boost_torque = 0.0
+        # Nếu sai số lớn hơn 2 độ (khoảng 0.035 rad), cấp thêm momen "hích"
+        if abs(ep) > 0.035:
+            if ep < 0: # Vị trí hiện tại < đích -> Cần chạy lên (chiều dương)
+                boost_torque = 0.2
+            else:      # Vị trí hiện tại > đích -> Cần chạy xuống (chiều âm)
+                boost_torque = -0.2
         tor = Ic * (qddot_d - (Kp * ep + Kd * ev)) + m * g * lc * math.cos(q) + D*qdot 
+        tor = tor * self.torque_scale
         tor = (tor)/self.tor_coef/gear_ratio
         self.torque_set = max(min(tor, self.max_torque), -self.max_torque)
 

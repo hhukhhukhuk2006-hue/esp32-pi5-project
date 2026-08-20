@@ -408,7 +408,7 @@ class ESP32UARTManager:
                         # ESP32 sendDataToPC: crcVal = ID + dataLen + frame[3] + frame[frameLen-4]
                         # frame[3] = payload[1], frame[frameLen-4] = payload[dataLen-1]
                         if data_len >= 2:
-                            crc_calc = (frame_id + data_len + payload[1] + payload[data_len - 1]) & 0xFFFF
+                            crc_calc = (frame_id + data_len + payload[0] + payload[data_len - 1]) & 0xFFFF
                         elif data_len == 1:
                             # frame[3] is CRC byte (not payload), frame[frameLen-4]=frame[2]=payload[0]
                             # ESP32 sendDataToPC with dataLen=1: frame[3]=CRC_L, frame[frameLen-4]=frame[2]=payload[0]
@@ -424,10 +424,11 @@ class ESP32UARTManager:
                         else:
                             self.packets_crc_error += 1
                             logger.warning(
-                                f"Gói tin UART lỗi CRC! ID={frame_id}, Nhận={crc_recv}, Dự kiến={crc_calc_1}"
+                                f"Gói tin UART lỗi CRC! ID={frame_id}, Nhận={crc_recv}, Dự kiến={crc_calc}"
                             )
                     else:
                         logger.warning(f"Gói tin UART mất EOF (nhận được {hex(rx_byte)} thay vì {hex(UART_FRAME_EOF)})")
+                    rx_state = "WAIT_SOF"
 
                     # Reset máy trạng thái cho gói tiếp theo
                     rx_state = "WAIT_SOF"

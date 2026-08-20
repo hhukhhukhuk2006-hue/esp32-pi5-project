@@ -144,13 +144,14 @@ class ESP32UARTManager:
     def auto_detect_port() -> str:
         """Tự động phát hiện cổng UART trên Raspberry Pi hoặc Windows/Linux"""
         if sys.platform.startswith("linux"):
-            # Các cổng mặc định phổ biến trên Raspberry Pi 5 / Linux
+            # Ưu tiên các cổng USB-UART gắn ngoài trước, sau đó mới đến cổng GPIO mặc định
             candidate_ports = [
-                "/dev/ttyAMA0",
-                "/dev/serial0",
                 "/dev/ttyUSB0",
                 "/dev/ttyUSB1",
-                "/dev/ttyACM0"
+                "/dev/ttyACM0",
+                "/dev/ttyACM1",
+                "/dev/serial0",
+                "/dev/ttyAMA0"
             ]
             for p in candidate_ports:
                 try:
@@ -159,7 +160,7 @@ class ESP32UARTManager:
                         return p
                 except Exception:
                     pass
-            return "/dev/ttyAMA0"
+            return "/dev/ttyUSB0"
         else:
             # Trên Windows: tìm cổng COM có sẵn
             if serial:
@@ -532,8 +533,8 @@ if __name__ == "__main__":
 
     # Khởi tạo UART Manager
     uart_mgr = ESP32UARTManager()
-    detected_port = uart_mgr.auto_detect_port()
-    print(f"[*] Cong UART kha dung: {detected_port}")
+    detected_port = sys.argv[1] if len(sys.argv) > 1 else uart_mgr.auto_detect_port()
+    print(f"[*] Cong UART duoc chon: {detected_port}")
 
     # Hàm in telemetry khi nhận được gói tin từ ESP32
     def print_telemetry(data: RobotTelemetry):

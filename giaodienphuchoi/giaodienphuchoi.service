@@ -1,0 +1,37 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Giao diện phục hồi — systemd service (auto-start khi Pi5 boot)
+# ─────────────────────────────────────────────────────────────────────────────
+#  Cài đặt:
+#    1. Sửa User=phcn, WorkingDirectory=/home/phcn/...
+#       cho đúng với user + đường dẫn thực tế của bạn.
+#    2. Copy file này vào /etc/systemd/system/:
+#       sudo cp giaodienphuchoi.service /etc/systemd/system/
+#       sudo systemctl daemon-reload
+#       sudo systemctl enable giaodienphuchoi.service
+#       sudo systemctl start giaodienphuchoi.service
+#    3. Xem log:
+#       journalctl -u giaodienphuchoi -f
+#       journalctl -u giaodienphuchoi -n 200 --no-pager
+#    4. Dừng:
+#       sudo systemctl stop giaodienphuchoi.service
+# ─────────────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=Giao dien phuc hoi chuc nang - PyQt5 GUI
+After=graphical.target network.target
+
+[Service]
+Type=simple
+User=phcn
+WorkingDirectory=/home/phcn/phcn/giaodienphuchoi/scripts
+Environment=PYTHONPATH=/home/phcn/phcn
+Environment=QT_QPA_PLATFORM=eglfs
+Environment=QT_QPA_EGLFS_HIDECURSOR=1
+ExecStart=/home/phcn/phcn/giaodienphuchoi/scripts/runapp_linux.sh
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical.target

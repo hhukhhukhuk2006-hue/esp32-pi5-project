@@ -1,0 +1,11 @@
+Thông tin buổi tập:
+Tên buổi tập: BN1_session02_2024-06-11
+Ngày: 2024-06-11	Thời gian: 17:20:40 đến 17:20:48
+Bệnh nhân: HXT	ID: BN1
+Bác sỹ: HXT	ID: HXT
+
+Nội dung buổi tập:
+Bài tập: Chạy hình sin khớp hông biên độ 20, chu kỳ 4.0 giây	Nội dung: 
+
+Nhận xét đánh giá:
+

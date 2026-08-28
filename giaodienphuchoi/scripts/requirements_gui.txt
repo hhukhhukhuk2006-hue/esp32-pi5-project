@@ -1,0 +1,11 @@
+# GUI phục hồi chức năng — giaodienphuchoi/
+# Cài: python -m pip install -r giaodienphuchoi/scripts/requirements_gui.txt
+#
+# Lưu ý: PyQt5 + pyqtgraph + numpy + scipy + pyserial thường đã có sẵn
+# trong interpreter global / venv mà bạn dùng để chạy GUI.py. File này
+# chỉ liệt kê để nhắc (chưa cài pinned version).
+PyQt5>=5.15
+pyqtgraph>=0.13
+numpy>=1.24
+scipy>=1.10
+pyserial>=3.5

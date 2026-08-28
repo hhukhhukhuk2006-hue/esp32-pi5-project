@@ -1,0 +1,12 @@
+Thông tin buổi tập:
+Tên buổi tập: BN1_session03_2024-06-21
+Ngày: 2024-06-21	Thời gian: 23:26:12 đến 23:26:25
+Bệnh nhân: Hoàng Xuân Tùng	ID: BN1
+Bác sỹ: HXT	ID: HXT
+
+Nội dung buổi tập:
+Bài tập: Chạy hình sin khớp đầu gối biên độ 30, chu kỳ 4.0 giây	Nội dung: Số chu kỳ:1
+Bài tập: Chạy hình sin khớp cổ chân biên độ 18, chu kỳ 4.0 giây	Nội dung: Số chu kỳ:1
+
+Nhận xét đánh giá:
+

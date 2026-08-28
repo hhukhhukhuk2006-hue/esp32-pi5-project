@@ -55,6 +55,16 @@ class ControlGUI(tk.Tk):
 
         # UI state
         self.plotting = True
+
+        # --- THÊM MỚI: Biến lưu khớp đang được chọn để hiển thị ---
+        # 0 = HIP (Hông), 1 = KNEE (Gối), 2 = ANKLE (Cổ chân)
+        self.selected_joint = tk.IntVar(value=0)
+
+        # --- THÊM MỚI: Placeholder cho UART Manager (được inject từ main.py) ---
+        # Nếu main.py inject uart vào, đồ thị sẽ đọc dữ liệu từ ESP32 telemetry.
+        # Nếu không có (chạy standalone), hoạt động y hệt như cũ (đọc từ ODrive trực tiếp).
+        self.uart = None
+
         # Build UI
         self._build_ui()
         # Start periodic combined updates
@@ -89,17 +99,16 @@ class ControlGUI(tk.Tk):
         top_right.pack(side=tk.TOP, fill=tk.X)
 
         for c in range(3): top_right.columnconfigure(c, weight=1)
-        for r in range(3): top_right.rowconfigure(r, weight=1)
+        for r in range(4): top_right.rowconfigure(r, weight=1)
         
         # 1. Status Label
         self.status_label = tk.Label(top_right, text="Ready", relief="ridge", bg="lightgreen")
         self.status_label.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
-        # 2. Offset button
         # NÚT MỚI: Calib button (Nằm ở giữa)
         self.btn_calib = tk.Button(top_right, text="Calib", bg="lightblue", relief="raised", command=self._on_calib)
         self.btn_calib.grid(row=0, column=1, sticky="nsew", padx=2, pady=2)
 
-        # 2. Offset button (Đổi column từ 1 sang 2 để nó đẩy sang góc phải)
+        # 2. Offset button
         self.btn_offset = tk.Button(top_right, text="Offset", bg="tomato", relief="raised", command=self._on_offset)
         self.btn_offset.grid(row=0, column=2, sticky="nsew", padx=2, pady=2)
         # 3. IDLE/Close loop toggle (mode)
@@ -114,6 +123,36 @@ class ControlGUI(tk.Tk):
         # 6. EStop
         self.btn_estop = tk.Button(top_right, text="ESTOP", bg="red", fg="white", relief="raised", command=self._on_estop)
         self.btn_estop.grid(row=2, column=1, sticky="nsew", padx=2, pady=2)
+
+        # ==============================================================================================
+        # THÊM MỚI: THANH CHỌN KHỚP (Radio Buttons) - Row 3
+        # ==============================================================================================
+        joint_frame = ttk.LabelFrame(top_right, text="Khop hien thi")
+        joint_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", padx=2, pady=4)
+
+        JOINT_LABELS = [
+            ("Hip (Hong)",     0, "#FF6B6B"),   # Đỏ
+            ("Knee (Goi)",     1, "#4ECDC4"),   # Xanh ngọc
+            ("Ankle (Co chan)",2, "#45B7D1"),   # Xanh dương
+        ]
+        for col_idx, (label, val, color) in enumerate(JOINT_LABELS):
+            rb = tk.Radiobutton(
+                joint_frame,
+                text=label,
+                variable=self.selected_joint,
+                value=val,
+                command=self._on_joint_select,  # Gọi callback khi bấm chọn
+                bg=color,
+                fg="white",
+                selectcolor="#333333",
+                activebackground=color,
+                font=("Helvetica", 8, "bold"),
+                relief="raised",
+                indicatoron=0,   # Kiểu nút bấm đặc (không phải tròn)
+                padx=4, pady=3
+            )
+            rb.grid(row=0, column=col_idx, sticky="nsew", padx=2, pady=2)
+            joint_frame.columnconfigure(col_idx, weight=1)
 
         # Move controls==================================================================================================================================================
         control_frame = ttk.LabelFrame(right, text="Control", padding=8)
@@ -222,6 +261,17 @@ class ControlGUI(tk.Tk):
             ax.legend(loc="upper right")
 
         # Keep a reference to last plotted time origin to keep plots stable
+        self._last_t0 = None
+
+    # ---------------------------------------------------------------------------
+    # THÊM MỚI: Callback khi người dùng bấm chọn khớp
+    # ---------------------------------------------------------------------------
+    def _on_joint_select(self):
+        """Được gọi mỗi khi người dùng bấm Radio Button chọn khớp khác."""
+        joint_names = ["Hip (Hong)", "Knee (Goi)", "Ankle (Co chan)"]
+        selected = self.selected_joint.get()
+        self.status_text.set(f"Status: Dang xem khop {joint_names[selected]}")
+        # Reset trục thời gian để đồ thị vẽ lại từ đầu khi đổi khớp
         self._last_t0 = None
 
     # ---------------------------------------------------------------------------
@@ -411,9 +461,29 @@ class ControlGUI(tk.Tk):
                 self.btn_offset.configure(state="normal", bg="tomato")
 
             # Get data for plotting and display
+            # =======================================================================
+            # THÊM MỚI: Nếu có UART (inject từ main.py), đọc telemetry của khớp
+            # đang được chọn từ ESP32. Nếu không có, đọc từ ODrive trực tiếp như cũ.
+            # =======================================================================
             data = []
+            joint_idx = self.selected_joint.get()  # 0=HIP, 1=KNEE, 2=ANKLE
+
             try:
-                data = self.controller.get_data()
+                if self.uart is not None and self.uart.is_connected():
+                    # --- Chế độ UART: Đọc telemetry từ ESP32 ---
+                    # Lấy bản sao an toàn của toàn bộ telemetry
+                    tel = self.uart.telemetry
+                    if tel.last_updated_time > 0:
+                        j = tel.joints[joint_idx]
+                        t_now = tel.last_updated_time
+                        # Chuyển sang tuple giống format của ODriveThread.get_data()
+                        # để các dòng vẽ đồ thị bên dưới không cần sửa gì!
+                        # Format: (time, pos, vel, acc, pos_set, vel_set, acc_set, jerk, torque)
+                        data = [(t_now, j.actual_pos, j.actual_vel, j.actual_acc,
+                                 j.set_pos, j.set_vel, j.set_acc, 0.0, j.torque_set)]
+                else:
+                    # --- Chế độ ODrive trực tiếp (legacy): Đọc từ controller ---
+                    data = self.controller.get_data()
             except Exception:
                 data = []
 

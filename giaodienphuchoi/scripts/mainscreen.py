@@ -35,6 +35,7 @@ from PyQt5.QtWidgets import (QFrame, QMainWindow, QMessageBox, QTableWidgetItem)
 from UiScripts.dev_ui import Ui_DevScreen
 from UiScripts.doctor_ui import Ui_DoctorScreen
 from UiScripts.patient_ui import Ui_PatientScreen
+from UiScripts.joint_plot_widget import JointPlotWidget   # THÊM MỚI: Widget đồ thị 3×3
 from popups import (AccountManagerDialog, SessionDialog, ReportDialog,
                     AccountDialog, SetAngleDialog, SetSineDialog)
 
@@ -812,6 +813,36 @@ class UserMainScreen(QMainWindow):
                 joint['q_fb'].append(pkt.q_fb_deg[i])
                 joint['error'].append(pkt.err_deg[i])
 
+            # ── THÊM MỚI: Đẩy dữ liệu vào JointPlotWidget (nếu đang mở) ────
+            # Dùng getattr để an toàn — không raise AttributeError nếu màn hình
+            # không phải DevMainScreen (PatientScreen / DoctorScreen cũng kế thừa
+            # hàm này nhưng không có _joint_plot_widget).
+            pw = getattr(self, '_joint_plot_widget', None)
+            if pw is not None:
+                # q_fb: vị trí thực tế (deg) — đây là dữ liệu chính
+                # q_set: setpoint (deg)
+                # Gia tốc & vận tốc: tạm dùng jerk_tracker nếu có; nếu không → 0.0
+                pos_fb  = [self.feedback_data[i]['q_fb'][-1]  for i in range(3)]
+                pos_set = [self.feedback_data[i]['q_set'][-1] for i in range(3)]
+
+                # Lấy vel / acc từ JerkTracker nếu có (None → 0.0)
+                jt = getattr(self, 'jerk_tracker', None)
+                if jt is not None and hasattr(jt, 'last_vel') and hasattr(jt, 'last_acc'):
+                    vel_fb  = list(getattr(jt, 'last_vel',  [0.0, 0.0, 0.0]))
+                    acc_fb  = list(getattr(jt, 'last_acc',  [0.0, 0.0, 0.0]))
+                else:
+                    vel_fb  = [0.0, 0.0, 0.0]
+                    acc_fb  = [0.0, 0.0, 0.0]
+
+                pw.push_data(
+                    pos_actual=pos_fb,
+                    vel_actual=vel_fb,
+                    acc_actual=acc_fb,
+                    pos_set=pos_set,
+                    vel_set=[0.0, 0.0, 0.0],   # Setpoint vel chưa có từ backend
+                    acc_set=[0.0, 0.0, 0.0],   # Setpoint acc chưa có từ backend
+                )
+
     # ─────────────────────────────────────────────────────────────────────
     #  Helper giống LLRR
     # ─────────────────────────────────────────────────────────────────────
@@ -1285,6 +1316,82 @@ class DevMainScreen(DoctorDev):
         with open(self.path_control_data, 'r') as f:
             self.control_data = json.load(f); f.close()
         self.path_reports = os.path.join(self.path_root, id, 'reports')
+
+        # ── THÊM MỚI: JointPlotWidget (Đồ thị 3×3 realtime) ─────────────────
+        # Nhúng vào frame_control (840×650) — cùng kích thước với frame_exercises.
+        # Mặc định ẨN. Bấm nút 📈 để toggle qua lại.
+        self._joint_plot_widget = JointPlotWidget(parent=self.ui.frame_control)
+        self._joint_plot_widget.setGeometry(0, 45, 840, 605)
+        self._joint_plot_widget.hide()   # Lazy: ẩn → timer TẮT hoàn toàn
+        self._plot_view_active = False   # Trạng thái toggle
+
+        # Nút toggle 📈 — đặt trong khoảng trống phía trên của frame_control
+        # (x=700, y=0) để không bị đè lên các widget khác khi màn hình bị thu nhỏ
+        from PyQt5.QtWidgets import QPushButton as _QPB
+        self._btn_toggle_plot = _QPB(self.ui.frame_control)
+        self._btn_toggle_plot.setGeometry(700, 0, 130, 40)
+        self._btn_toggle_plot.setText("📈 Đồ thị")
+        self._btn_toggle_plot.setStyleSheet(
+            "QPushButton {"
+            "   color: white; font-size: 12px; font-weight: bold;"
+            "   background-color: #0f3460;"
+            "   border-radius: 10px; border: 2px solid #e94560;"
+            "}"
+            "QPushButton:hover { background-color: #16213e; }"
+            "QPushButton:checked {"
+            "   background-color: #e94560;"
+            "   border-color: #0f3460;"
+            "}"
+        )
+        self._btn_toggle_plot.setCheckable(True)
+        self._btn_toggle_plot.clicked.connect(self._toggle_joint_plot)
+        self._btn_toggle_plot.raise_()   # Đưa lên trên cùng
+
+        # ── SỬA LỖI UI: 3 NÚT BỊ CẮT CHỮ ─────────────────────────────────────
+        # Thu nhỏ 3 nút ở frame_set để vừa với chiều rộng (280) -> không bị cắt chữ "RE..."
+        self.ui.button_start.setGeometry(0, 330, 90, 110)
+        self.ui.button_mode.setGeometry(95, 330, 90, 110)
+        self.ui.button_reset.setGeometry(190, 330, 90, 110)
+
+        # ── SỬA LỖI UI: TRÀN CHỮ TRÊN WINDOWS (Do scaling / DPI) ─────────────
+        # Mở rộng các nhãn (label) và thu hẹp bớt ô nhập (text) để không bị cắt chữ
+        # Dòng 1: Cân nặng - Chiều cao
+        self.ui.label_weight.setGeometry(0, 105, 90, 30)         # "Cân nặng:"
+        self.ui.text_weight.setGeometry(90, 105, 65, 30)
+        self.ui.label_unitWeight.setGeometry(160, 105, 30, 30)   # "Kg"
+        self.ui.label_height.setGeometry(210, 105, 95, 30)       # "Chiều cao:"
+        self.ui.text_height.setGeometry(310, 105, 65, 30)
+        self.ui.label_unitHeight.setGeometry(380, 105, 30, 30)   # "cm"
+
+        # Dòng 2: Kích thước chân
+        self.ui.label_leg.setGeometry(0, 140, 160, 30)           # "Kích thước chân:"
+
+        # Dòng 3: Đùi - Cẳng chân
+        self.ui.label_thigh.setGeometry(0, 175, 45, 30)          # "Đùi:"
+        self.ui.text_thigh.setGeometry(50, 175, 65, 30)
+        self.ui.label_unitThigh.setGeometry(120, 175, 30, 30)    # "cm"
+        self.ui.label_shank.setGeometry(190, 175, 100, 30)       # "Cẳng chân:"
+        self.ui.text_shank.setGeometry(295, 175, 65, 30)
+        self.ui.label_unitShank.setGeometry(365, 175, 30, 30)    # "cm"
+
+        # Phần Quản lý tài khoản: Mở rộng nút "Kỹ thuật viên" và "Bác sỹ"
+        self.ui.button_accDoctor.setGeometry(40, 545, 140, 60)
+        self.ui.button_accDev.setGeometry(210, 545, 170, 60)
+
+    def _toggle_joint_plot(self, checked: bool):
+        """Toggle giữa màn hình điều khiển và màn hình đồ thị 3×3."""
+        if checked:
+            # Chuyển sang chế độ ĐỒ THỊ
+            self.ui.frame_exercises.hide()   # Ẩn bảng chọn bài tập
+            self._joint_plot_widget.show()   # Hiện đồ thị → timer TỰ ĐỘNG BẬT
+            self._btn_toggle_plot.setText("⬅ Điều khiển")
+            self._plot_view_active = True
+        else:
+            # Quay về màn hình ĐIỀU KHIỂN
+            self._joint_plot_widget.hide()   # Ẩn đồ thị → timer TỰ ĐỘNG TẮT
+            self.ui.frame_exercises.show()   # Hiện lại bảng bài tập
+            self._btn_toggle_plot.setText("📈 Đồ thị")
+            self._plot_view_active = False
 
     def data_save(self):
         """Save PID + push xuống embedded computer."""

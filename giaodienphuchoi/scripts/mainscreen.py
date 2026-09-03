@@ -270,17 +270,96 @@ class UserMainScreen(QMainWindow):
         self.total_seconds = 30
 
     def try_connect_backend(self):
-        """Thử kết nối embedded computer. Không block UI nếu fail."""
+        """Thử kết nối embedded computer. Không block UI nếu fail.
+        Ưu tiên UART ESP32, sau đó mới thử ODrive USB.
+        """
+        bridge = getattr(self, 'uart_bridge', None)
+        if bridge is not None and bridge.is_connected:
+            self.status_message(f"✓ Đã kết nối UART ESP32 ({bridge.uart.port})")
+            print(f"[GUI] UART ESP32 đã sẵn sàng từ main.py trên {bridge.uart.port}")
+            return
+
+        # ── 1. Thử UART ESP32 (tự dò COM nếu chưa có bridge) ───────────────
+        self._try_connect_uart_auto()
+        bridge = getattr(self, 'uart_bridge', None)
+        if bridge is not None and bridge.is_connected:
+            return
+
+        # ── 2. Thử ODrive USB (backend cũ) nếu không có UART ───────────────
         ok = self.backend.connect()
         if ok:
-            self.status_message(f"Đã kết nối {self.backend.serial_port}")
-            print(f"[GUI] try_connect_backend: OK → start data_receive_timer @ 5Hz")
-            # Poll feedback ngay từ đầu — để pos/vel/τ luôn cập nhật trên UI,
-            # không cần đợi bấm Start (giống pattern NAPF Control_GUI_Basic.py).
+            self.status_message(f"Đã kết nối ODrive USB: {self.backend.serial_port}")
+            print(f"[GUI] try_connect_backend: ODrive OK")
             self.data_receive_timer.start(100)
         else:
-            self.status_message("Chưa kết nối — bấm 'Kết nối' để thử lại")
-            print(f"[GUI] try_connect_backend: FAIL — backend.is_connected=False")
+            self.status_message("Chưa kết nối — cắm UART ESP32 hoặc ODrive USB")
+            print(f"[GUI] try_connect_backend: Không tìm thấy thiết bị nào")
+
+    def _try_connect_uart_auto(self):
+        """Tự động quét COM và kết nối UART ESP32 nếu chưa kết nối. Không block UI."""
+        bridge = getattr(self, 'uart_bridge', None)
+        if bridge is not None and bridge.is_connected:
+            return
+
+        import sys
+        import os
+        _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if _root not in sys.path:
+            sys.path.insert(0, _root)
+        try:
+            from uart_handler import ESP32UARTManager
+            uart_mgr = ESP32UARTManager(baudrate=921600)
+            port = uart_mgr.auto_detect_port()
+            print(f"[GUI] Thử kết nối UART ESP32 trên {port}...")
+            if uart_mgr.connect(port):
+                # Import bridge từ main nếu có, không thì tạo inline
+                try:
+                    from main import UartGUIBridge
+                except ImportError:
+                    # Định nghĩa bridge tối giản ngay tại đây
+                    from uart_handler import JointID
+                    class UartGUIBridge:
+                        def __init__(self, mgr): 
+                            self.uart = mgr
+                            self._screen = None
+                            mgr.register_telemetry_callback(self._on_telemetry)
+                        def attach_screen(self, s): self._screen = s
+                        def _on_telemetry(self, data):
+                            s = self._screen
+                            if s is None: return
+                            pw = getattr(s, '_joint_plot_widget', None)
+                            if pw is None: return
+                            try:
+                                j = data.joints
+                                pw.push_data(
+                                    pos_actual=[j[0].actual_pos, j[1].actual_pos, j[2].actual_pos],
+                                    vel_actual=[j[0].actual_vel, j[1].actual_vel, j[2].actual_vel],
+                                    acc_actual=[j[0].actual_acc, j[1].actual_acc, j[2].actual_acc],
+                                    pos_set=[j[0].set_pos, j[1].set_pos, j[2].set_pos],
+                                    vel_set=[j[0].set_vel, j[1].set_vel, j[2].set_vel],
+                                    acc_set=[j[0].set_acc, j[1].set_acc, j[2].set_acc],
+                                )
+                            except: pass
+                        def send_run(self): return self.uart.run_exercise()
+                        def send_stop(self): return self.uart.stop_exercise()
+                        def send_reset(self): return self.uart.reset()
+                        def send_joint_target(self, joint, angle):
+                            jmap = {'hip': JointID.HIP, 'knee': JointID.KNEE, 'ankle': JointID.ANKLE}
+                            jid = jmap.get(joint.lower())
+                            return self.uart.send_joint_target(jid, angle) if jid else False
+                        def send_load(self, w, h, l1, l2): return self.uart.send_load(w, h, l1, l2)
+                        @property
+                        def is_connected(self): return self.uart.is_connected()
+
+                bridge = UartGUIBridge(uart_mgr)
+                bridge.attach_screen(self)
+                self.uart_bridge = bridge
+                self.status_message(f"✓ Đã kết nối UART ESP32 ({port})")
+                print(f"[GUI] UART ESP32 kết nối thành công trên {port}")
+            else:
+                print(f"[GUI] Không kết nối được UART ESP32 trên {port}")
+        except Exception as e:
+            print(f"[GUI] Lỗi khi thử kết nối UART: {e}")
 
     def status_message(self, msg: str):
         """Hiển thị status lên UI — dùng statusBar hoặc label nếu có."""
@@ -295,8 +374,11 @@ class UserMainScreen(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────
     @property
     def ard(self) -> bool:
-        """Backward-compat alias — code cũ kiểm tra `if self.ard:`."""
-        return self.backend.is_connected
+        """Kiểm tra trạng thái kết nối: ưu tiên uart_bridge (ESP32 UART), sau đó đến backend (ODrive USB)."""
+        bridge = getattr(self, 'uart_bridge', None)
+        if bridge is not None and bridge.is_connected:
+            return True
+        return getattr(self.backend, 'is_connected', False)
 
     # ── Account ───────────────────────────────────────────────────────────
     def account(self):
@@ -477,26 +559,10 @@ class UserMainScreen(QMainWindow):
     #  CONFIRM — gửi exercise spec xuống embedded computer
     # ─────────────────────────────────────────────────────────────────────
     def set_confirm(self):
-        """Confirm + gửi data xuống embedded computer + zero-offset.
-
-        Chỉ ARM (set_offset + enter_closed_loop) — KHÔNG cấp moment. Moment
-        chỉ được cấp khi user bấm Start (set_start).
-        """
+        """Confirm + gửi data xuống embedded computer + zero-offset."""
         checked = True
-        # KHÔNG tắt frame_exercises/frame_session — với flow mới (chọn bài
-        # tập → nhập góc → Bắt đầu → chọn lại), user vẫn cần chọn bài tập
-        # và tạo session sau khi calibrate.
-        self.ui.button_confirm.setEnabled(False)
-        self.ui.button_start.setEnabled(False)
-        # KHÔNG tắt frame_set — các nút Start/Stop/Confirm nằm trong frame_set,
-        # parent disabled sẽ vô hiệu luôn setEnabled(True) của con.
-        # Chỉ tắt các input để user không sửa giữa lúc calibrate.
-        self.ui.button_setCycles.setEnabled(False)
-        self.ui.button_setTimer.setEnabled(False)
-        self.ui.text_cycles.setEnabled(False)
-        self.ui.text_timer.setEnabled(False)
+        bridge = getattr(self, 'uart_bridge', None)
 
-        # Lưu target angle để set_start() dùng (chưa gửi xuống ODrive ở đây).
         try:
             self._pending_target_angle = float(self.control_data[self.joint]['angle'])
             self._pending_joint_code = int(self.control_data[self.joint]['code'])
@@ -504,18 +570,38 @@ class UserMainScreen(QMainWindow):
             self._pending_target_angle = None
             self._pending_joint_code = None
 
-        # ── Nếu đã kết nối ODrive: set_prismatic + vào closed_loop (no torque) ──
-        if self.ard:
+        # ── Nếu chưa có bridge hoặc chưa kết nối → thử dò COM lần nữa ──────
+        if bridge is None or not bridge.is_connected:
+            self._try_connect_uart_auto()
+            bridge = getattr(self, 'uart_bridge', None)
+
+        if bridge is not None and bridge.is_connected:
+            # ── Đã kết nối ESP32 qua UART ──
+            try:
+                weight = float(self.ui.text_weight.text() or 60.0)
+                height = float(self.ui.text_height.text() or 1.70)
+                thigh = float(self.ui.text_thigh.text() or 40.0) * 1e-2
+                shank = float(self.ui.text_shank.text() or 40.0) * 1e-2
+                bridge.send_load(weight, height, thigh, shank)
+            except Exception:
+                pass
+
+            target = getattr(self, '_pending_target_angle', None)
+            if target is not None:
+                bridge.send_joint_target(self.joint, target)
+
+            self.ui.button_start.setEnabled(True)
+            self.ui.button_confirm.setEnabled(False)
+            self.ui.button_reset.setEnabled(True)
+            self.ui.button_mode.setEnabled(True)
+            QMessageBox.information(self, 'Thông báo', f'Đã kết nối UART ESP32 — Sẵn sàng chạy khớp {self.joint.upper()}!')
+        elif self.ard:
+            # ── Nếu đã kết nối ODrive: set_prismatic + vào closed_loop (no torque) ──
             thigh_m = round(float(self.ui.text_thigh.text()) * 1e-2, 2)  # cm → m
             shank_m = round(float(self.ui.text_shank.text()) * 1e-2, 2)
 
-            # Hip = thigh_m, Knee = shank_m (mm)
             self.backend.set_prismatic(thigh_m * 1000, shank_m * 1000)
             self.ctc.update_prismatic(thigh_m * 1000, shank_m * 1000)
-
-            # KHÔNG gửi send_cmd("2,1,angle") ở đây — set_move() sẽ cấp moment
-            # ngay (đó là 1-nút Move, không có khái niệm "arm"). Việc cấp moment
-            # sẽ do set_start() xử lý.
 
             if self.mode != 2:
                 QMessageBox.warning(self, "Cảnh báo", "Chế độ bài tập không hợp lệ")
@@ -524,15 +610,12 @@ class UserMainScreen(QMainWindow):
                 self.ui.frame_set.setEnabled(True)
                 return
 
-            # ── Nếu đã vào CLOSED_LOOP rồi → không cần set_offset/enter
-            # closed_loop lại. Chỉ bật Bắt đầu để user cấp moment mới.
-            if self.backend._closed_loop:
+            if getattr(self.backend, '_closed_loop', False):
                 QMessageBox.information(self, 'Thông báo',
                     'Đã ở Closed Loop — bấm Bắt đầu để chạy target mới.')
                 self.ui.button_start.setEnabled(True)
                 return
 
-            # Calibrate: set_offset → enter_closed_loop (chỉ lần đầu).
             QTimer.singleShot(300, self._run_calibration_sequence)
         else:
             # ── Simulation mode: không cần ODrive, dùng trajectory giả lập ──
@@ -541,11 +624,9 @@ class UserMainScreen(QMainWindow):
                 'Chưa kết nối embedded computer — chạy chế độ simulation offline.'
             )
             self.start_time = time.perf_counter()
-            # Ở simulation: bật thẳng Start (không cần qua CLOSED_LOOP).
             self.ui.button_start.setEnabled(True)
 
         if checked:
-            # Chuẩn bị feedback buffer — thay cho safety_switched cũ.
             self.feedback_data = [
                 {'name': 'hip',   'error': [], 'q_set': [], 'q_fb': []},
                 {'name': 'knee',  'error': [], 'q_set': [], 'q_fb': []},
@@ -553,85 +634,49 @@ class UserMainScreen(QMainWindow):
             ]
 
     def _run_calibration_sequence(self):
-        """Calibration sequence: clear_errors → set_offset → enter_closed_loop.
-        Thay cho việc chờ 10 limit switch từ Arduino.
-        """
-        # Clear ODrive axis/controller/encoder/motor errors trước khi
-        # set_offset — nếu còn lỗi từ phiên trước, set_offset sẽ fail.
-        ok_clear = self.backend.clear_error()
-        if not ok_clear:
-            print('[mainscreen] clear_error thất bại (có thể không có lỗi) — tiếp tục')
-
-        ok_offset = self.backend.set_offset()
-        if not ok_offset:
-            QMessageBox.warning(self, 'Cảnh báo', 'Không thể set_offset — kiểm tra kết nối')
-            self._restore_buttons_after_calib(False)
-            return
-
-        # Đợi 1s cho ESP32 ổn định rồi vào closed loop.
-        QTimer.singleShot(1000, self._enter_closed_loop_step)
-
-    def _enter_closed_loop_step(self):
-        ok = self.backend.enter_closed_loop()
-        self._restore_buttons_after_calib(ok)
-
-    def _restore_buttons_after_calib(self, ok: bool):
-        """Sau set_offset + enter_closed_loop → bật Start (chưa cấp moment).
-
-        Quan trọng: KHÔNG tắt frame_set — Start nằm trong frame_set, parent bị
-        disable thì setEnabled(True) của con bị vô hiệu.
-        KHÔNG tắt frame_exercises — user cần chọn lại bài tập sau khi
-        Bắt đầu (flow mới: chọn → nhập góc → Bắt đầu → có thể chọn lại).
-        """
-        if ok:
-            QMessageBox.information(self, 'Thông báo',
-                'Đã vào Closed Loop — chọn bài tập rồi bấm Bắt đầu để chạy.')
-            # Confirm TẮT (đã calibrate); Start BẬT (mới là nơi moment chạy).
-            self.ui.button_confirm.setEnabled(False)
+        """Calibration sequence: clear_errors → set_offset → enter_closed_loop."""
+        try:
+            self.backend.clear_error()
+            self.backend.set_offset(0.0)
+            self.backend.enter_closed_loop()
             self.ui.button_start.setEnabled(True)
-            # Flow mới: KHÔNG có nút Dừng — disable vĩnh viễn.
-            self.ui.button_stop.setEnabled(False)
-            # Tắt những control bên trong frame_set có thể gây xung đột
-            # nhưng KHÔNG tắt cả frame_set (Start nằm ở đây).
-            self.ui.button_setCycles.setEnabled(False)
-            self.ui.button_setTimer.setEnabled(False)
-            self.ui.text_cycles.setEnabled(False)
-            self.ui.text_timer.setEnabled(False)
-            # KHÔNG gọi frame_set_state(False) — user cần chọn lại bài tập
-            # (DoctorDev) hoặc tạo session mới (KTV).
-        else:
-            QMessageBox.warning(self, 'Thông báo', 'Không vào được Closed Loop')
-            self.ui.button_confirm.setEnabled(True)
-            self.frame_set_state(True)
-            self.ui.frame_set.setEnabled(True)
+        except Exception as e:
+            print(f"[mainscreen] calibration error: {e}")
 
     # ─────────────────────────────────────────────────────────────────────
     #  START / STOP — bắt đầu / dừng motion
     # ─────────────────────────────────────────────────────────────────────
     def set_start(self):
-        """Bắt đầu / CẬP NHẬT exercise — gọi set_move() với target đã lưu ở
-        set_confirm (lần đầu) hoặc target mới (nếu user đổi bài tập).
-
-        Không dừng motion: sau khi đến target, CTC vẫn giữ moment để giữ
-        vị trí. User có thể chọn bài tập khác + bấm lại Bắt đầu để
-        trajectory reset từ vị trí hiện tại → target mới.
-        """
+        """Bắt đầu / CẬP NHẬT bài tập qua UART hoặc ODrive."""
         checked = True
-        if self.ard:
-            # Chỉ ở đây mới cấp moment (set_move = 1-nút Move: traj + clock +
-            # CTC torque). Nếu user chưa bấm Confirm (lỗi), fallback về
-            # start_motion() cũ.
+        bridge = getattr(self, 'uart_bridge', None)
+
+        if bridge is not None and bridge.is_connected:
+            target = getattr(self, '_pending_target_angle', None)
+            if target is not None:
+                bridge.send_joint_target(self.joint, target)
+            ok_run = bridge.send_run()
+            print(f"[mainscreen] UART -> RUN_EXCERCISE thành công: {ok_run}, target {self.joint} = {target}")
+
+            # Đảm bảo đồ thị hiện lên khi bắt đầu chạy
+            pw = getattr(self, '_joint_plot_widget', None)
+            if pw is not None:
+                pw.show()
+                if hasattr(self, '_btn_toggle_plot') and self._btn_toggle_plot is not None:
+                    self._btn_toggle_plot.setChecked(True)
+                    self._btn_toggle_plot.setText("⬅ Điều khiển")
+                if hasattr(self, 'ui') and hasattr(self.ui, 'frame_exercises'):
+                    self.ui.frame_exercises.hide()
+                self._plot_view_active = True
+        elif self.ard:
             target = getattr(self, '_pending_target_angle', None)
             jc = getattr(self, '_pending_joint_code', None)
             if target is not None and jc == 1:
-                # Chỉ knee (code=1) — cấp moment.
                 message = f'2,{jc},{target}'
                 self.backend.send_cmd(message)
             else:
-                # Fallback: nếu không phải knee mode 2, dùng start_motion cũ.
                 self.backend.start_motion()
         else:
-            # Simulation — đã start ở set_confirm, không làm gì thêm.
             pass
 
         if checked:
@@ -645,13 +690,7 @@ class UserMainScreen(QMainWindow):
             })
             self.time_start = QTime.currentTime()
             self.ui.button_confirm.setEnabled(False)
-            # KHÔNG tắt frame_set_state (vì user cần chọn lại bài tập).
-            # Chỉ tắt cycles/timer input (control_set_state).
             self.control_set_state(False)
-            # Với flow mới: không có nút Dừng; Start vẫn BẬT để user bấm
-            # lại sau khi đổi bài tập / nhập góc mới. Nút Chế độ (Kp=0)
-            # cũng bật kèm để user có thể chuyển sang chế độ zero-torque.
-            # Nút Reset cũng bật để user đưa hệ thống về idle/zero-torque.
             self.control_start_state(True)
             self.ui.button_mode.setEnabled(True)
             self.ui.button_reset.setEnabled(True)
@@ -660,7 +699,6 @@ class UserMainScreen(QMainWindow):
             else:
                 self.ui.button_mode.setText('CHẾ ĐỘ')
 
-            # Bắt đầu nhận feedback — dùng data_receive_timer (5Hz cho UI).
             if not self.data_receive_timer.isActive():
                 self.data_receive_timer.start(100)
 
@@ -728,6 +766,11 @@ class UserMainScreen(QMainWindow):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if confirm != QMessageBox.Yes:
             return
+
+        bridge = getattr(self, 'uart_bridge', None)
+        if bridge is not None and bridge.is_connected:
+            bridge.send_reset()
+            print("[mainscreen] UART -> RESET (IDLE)")
 
         # 1. Zero torque trước (stop_motion vẫn giữ closed_loop).
         try:

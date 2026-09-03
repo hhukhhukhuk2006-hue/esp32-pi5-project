@@ -38,6 +38,8 @@ from PyQt5.QtWidgets import (QWidget, QGridLayout, QSizePolicy,
                               QPushButton, QHBoxLayout, QVBoxLayout, QLabel)
 from PyQt5.QtGui   import QFont
 
+from UiScripts.session_summary_dialog import SessionDataTracker, SessionSummaryDialog
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Cấu hình hiển thị
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,6 +89,10 @@ class JointPlotWidget(QWidget):
         # ── Trạng thái phóng to ────────────────────────────────────────────
         # None = đang ở chế độ 3×3. (row, col) = ô đang được phóng to.
         self._zoomed: tuple[int, int] | None = None
+
+        # ── Tracker tổng kết phiên đo ──────────────────────────────────────
+        self._tracker = SessionDataTracker()
+        self._was_visible: bool = False   # Để phân biệt hide lúc khởi động vs. bấm tắt
 
         # ── Build layout ───────────────────────────────────────────────────
         self._build_ui()
@@ -204,21 +210,31 @@ class JointPlotWidget(QWidget):
     #  LAZY RENDERING — Tự bật/tắt timer khi widget hiện/ẩn
     # =========================================================================
     def showEvent(self, event):
-        """Bật timer khi Tab Đồ thị được mở."""
+        """Bật timer và bắt đầu phiên đo mới khi Tab Đồ thị được mở."""
         super().showEvent(event)
         self._timer.start(UPDATE_MS)
+        self._was_visible = True
+        self._is_recording = True
+        self._tracker.reset()
 
     def hideEvent(self, event):
-        """Tắt timer khi Tab Đồ thị bị ẩn → CPU nghỉ ngơi hoàn toàn."""
+        """Tắt timer và DừNG phiên đo khi quay lại màn hình Điều Khiển.
+        Luôn hiện popup tóm tắt (có data → bảng đầy đủ / không có data → thông báo).
+        """
         super().hideEvent(event)
         self._timer.stop()
+        self._is_recording = False
+        if self._was_visible:
+            self._show_summary()
+        self._was_visible = False
 
     # =========================================================================
     #  NHẬN DỮ LIỆU TỪ BÊN NGOÀI (gọi từ data_receive() trong mainscreen.py)
     # =========================================================================
     def push_data(self,
                   pos_actual: list[float], vel_actual: list[float], acc_actual: list[float],
-                  pos_set:    list[float], vel_set:    list[float], acc_set:    list[float]):
+                  pos_set:    list[float], vel_set:    list[float], acc_set:    list[float],
+                  torque:     list[float] | None = None):
         """
         Đẩy 1 mẫu dữ liệu mới vào bộ đệm cho cả 3 khớp.
 
@@ -229,6 +245,7 @@ class JointPlotWidget(QWidget):
             pos_set:    [hip, knee, ankle] — Setpoint vị trí
             vel_set:    [hip, knee, ankle] — Setpoint vận tốc
             acc_set:    [hip, knee, ankle] — Setpoint gia tốc
+            torque:     [hip, knee, ankle] — Mô-men xoắn (Nm), tùy chọn
         """
         actual_rows = [pos_actual, vel_actual, acc_actual]
         set_rows    = [pos_set,    vel_set,    acc_set]
@@ -237,6 +254,13 @@ class JointPlotWidget(QWidget):
             for col in range(3):
                 self.buf_actual[row][col].append(actual_rows[row][col])
                 self.buf_set[row][col].append(set_rows[row][col])
+
+        # ── Ghi vào tracker phiên đo ──────────────────────────────────────
+        self._tracker.record(
+            pos_actual, vel_actual, acc_actual,
+            pos_set,    vel_set,    acc_set,
+            torque=torque,
+        )
 
     # =========================================================================
     #  VẼ LẠI ĐỒ THỊ (gọi theo chu kỳ bởi QTimer)
@@ -333,6 +357,15 @@ class JointPlotWidget(QWidget):
         self._zoom_overlay.hide()     # Ẩn overlay → grid 3×3 lộ ra
         self._btn_shrink.hide()
         self._lbl_title.setText("📈  Đồ thị 3 Khớp  |  Thời gian thực")
+
+    # =========================================================================
+    #  POPUP TÓM TẮT PHIÊN ĐO
+    # =========================================================================
+    def _show_summary(self):
+        """Hiển thị popup tóm tắt phiên đo, rồi reset tracker cho lần chạy tiếp."""
+        dlg = SessionSummaryDialog(self._tracker, parent=self.window())
+        dlg.exec()          # Modal — chờ người dùng đóng
+        self._tracker.reset()   # Reset để phiên chạy tiếp được tính mới
 
     def resizeEvent(self, event):
         """Khi widget bị resize: cập nhật kích thước overlay cho khớp."""

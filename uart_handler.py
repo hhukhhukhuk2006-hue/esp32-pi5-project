@@ -366,6 +366,10 @@ class ESP32UARTManager:
         data_len = 0
         payload = bytearray()
         crc_buff = bytearray()
+        
+        # Biến đếm debug
+        dbg_bytes_count = 0
+        last_dbg_time = time.time()
 
         while self.is_running and self.ser and self.ser.is_open:
             try:
@@ -373,6 +377,13 @@ class ESP32UARTManager:
                 if not byte_in:
                     continue
                 rx_byte = byte_in[0]
+                
+                # In raw byte ra màn hình (tối đa 20 byte mỗi giây để khỏi lag)
+                dbg_bytes_count += 1
+                if time.time() - last_dbg_time >= 1.0:
+                    logger.debug(f"[RX RAW] Da nhan {dbg_bytes_count} bytes trong 1s vua qua, byte cuoi la: {hex(rx_byte)}")
+                    dbg_bytes_count = 0
+                    last_dbg_time = time.time()
 
                 if rx_state == "WAIT_SOF":
                     if rx_byte == UART_FRAME_SOF:
@@ -386,6 +397,7 @@ class ESP32UARTManager:
                     data_len = rx_byte
                     payload = bytearray()
                     crc_buff = bytearray()
+                    
                     if data_len == 0:
                         rx_state = "READ_CRC"
                     else:
@@ -405,30 +417,24 @@ class ESP32UARTManager:
                     if rx_byte == UART_FRAME_EOF:
                         # Kiểm tra checksum CRC
                         crc_recv = struct.unpack("<H", crc_buff)[0]
-                        # ESP32 sendDataToPC: crcVal = ID + dataLen + frame[3] + frame[frameLen-4]
-                        # frame[3] = payload[1], frame[frameLen-4] = payload[dataLen-1]
-                        if data_len >= 2:
-                            crc_calc = (frame_id + data_len + payload[0] + payload[data_len - 1]) & 0xFFFF
-                        elif data_len == 1:
-                            # frame[3] is CRC byte (not payload), frame[frameLen-4]=frame[2]=payload[0]
-                            # ESP32 sendDataToPC with dataLen=1: frame[3]=CRC_L, frame[frameLen-4]=frame[2]=payload[0]
-                            # This is an edge case unlikely to occur in practice (telemetry is always 96 bytes)
-                            crc_calc = (frame_id + data_len + payload[0] + payload[0]) & 0xFFFF
+                        
+                        # Theo bản C đúng: crcVal = ID + dataLen + frame[3] + frame[frameLen-4]
+                        # Trong đó frame[3] là payload[0], frame[frameLen-4] là payload[dataLen-1]
+                        if data_len >= 1:
+                            crc_expected = (frame_id + data_len + payload[0] + payload[data_len - 1]) & 0xFFFF
                         else:
-                            crc_calc = (frame_id + data_len) & 0xFFFF
-                        crc_valid = (crc_recv == crc_calc)
+                            crc_expected = (frame_id + data_len) & 0xFFFF
 
-                        if crc_valid:
+                        if crc_recv == crc_expected:
                             self.packets_received += 1
                             self._parse_incoming_packet(frame_id, bytes(payload))
                         else:
                             self.packets_crc_error += 1
                             logger.warning(
-                                f"Gói tin UART lỗi CRC! ID={frame_id}, Nhận={crc_recv}, Dự kiến={crc_calc}"
+                                f"Gói tin UART lỗi CRC! ID={frame_id}, Nhận={crc_recv}, Dự kiến={crc_expected}"
                             )
                     else:
                         logger.warning(f"Gói tin UART mất EOF (nhận được {hex(rx_byte)} thay vì {hex(UART_FRAME_EOF)})")
-                    rx_state = "WAIT_SOF"
 
                     # Reset máy trạng thái cho gói tiếp theo
                     rx_state = "WAIT_SOF"
@@ -438,10 +444,16 @@ class ESP32UARTManager:
             except serial.SerialException as e:
                 if self.is_running:
                     logger.error(f"Lỗi cổng serial trong luồng RX: {e}")
+                    # Nếu lỗi ClearCommError (USB bị rút/lỏng chập chờn), dừng luồng an toàn
+                    if "ClearCommError" in str(e) or "PermissionError" in str(e):
+                        logger.warning("[UART] Thiết bị USB bị ngắt kết nối vật lý hoặc lỏng cáp!")
+                        self.is_running = False
+                        break
                     time.sleep(0.5)
             except Exception as e:
                 if self.is_running:
                     logger.error(f"Lỗi ngoại lệ trong luồng RX: {e}")
+                    time.sleep(0.5)
 
     def _parse_incoming_packet(self, frame_id: int, payload: bytes):
         """Phân tích nội dung payload sau khi qua kiểm tra CRC"""
